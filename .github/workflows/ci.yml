@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  run-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run A/B test analysis
+        run: python ab_test_analysis.py
+
+      - name: Verify results JSON produced
+        run: |
+          python -c "import json; d=json.load(open('results/ab-test-real-results.json')); \
+          m=d['realMetrics']; assert m['is_significant'] is True, 'expected significant result'; \
+          assert m['z_p_value_two_sided'] < 0.05, 'p-value not significant'; \
+          print('OK: ab-test results valid, z-test p =', round(m['z_p_value_two_sided'],4))"

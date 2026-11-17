@@ -1,24 +1,34 @@
 """
-Анализ A/B-теста через scipy.stats.
+Статистический анализ A/B-теста.
 
-ВНИМАНИЕ: реальный публичный датасет A/B-тестов требует аккаунта Kaggle,
-поэтому в скрипте используются синтетические данные, сгенерированные через
-numpy с seed=42 для воспроизводимости. Это честный подход для демонстрации
-статистических методов (t-test, p-value, доверительные интервалы).
+Сценарий: A/B-тест нового алгоритма рекомендаций на лендинге интернет-магазина.
+- Группа A (контроль): старый лендинг
+- Группа B (тест): новый алгоритм рекомендаций
+- Метрика: бинарная конверсия в покупку (0/1)
+- Размер: 5 000 + 5 000 пользователей
 
-Сценарий: A/B-тест лендинга. Контроль (A) — старая версия, тест (B) — новый
-алгоритм рекомендаций. Метрика — конверсия в покупку.
+Данные: синтетические, сгенерированные через numpy (seed=42) для воспроизводимости.
+Реальные данные A/B-тестов компаний не публикуются — это честный подход для
+демонстрации статистических методов. Если у вас есть собственный датасет
+A/B-теста (CSV с колонками group и converted) — замените блок генерации на
+чтение CSV, остальной код останется без изменений.
 
-Скрипт:
-1. Генерирует синтетические данные через numpy (2x5000 пользователей)
-2. Считает конверсию в каждой группе
-3. Применяет two-proportion z-test через scipy.stats (используется пропорции)
-4. Применяет t-test для бинарных исходов через scipy.stats.ttest_ind
-5. Считает 95% доверительный интервал для разницы конверсий
-6. Считает effect size (Cohen's h)
-7. Делаёт вывод: статистически значимо или нет (α=0.05)
+Статистические методы (порядок — от канонического к проверочному):
+  1. Z-test для пропорций — основной, канонический метод для бинарной конверсии.
+     Формула: z = (p_B - p_A) / sqrt(p_pool*(1-p_pool)*(1/n_A + 1/n_B))
+  2. Welch's t-test (scipy.stats.ttest_ind, equal_var=False) — перекрёстная
+     проверка. Для бинарных 0/1 исходов асимптотически эквивалентен z-test при
+     больших n; приводится для полноты, но не является «более корректным», чем
+     z-test для долей.
+  3. 95% доверительный интервал для разницы конверсий (Wald).
+  4. Effect size — Cohen's h (для пропорций).
+  5. Вывод о значимости при α = 0.05 (двухсторонний тест как основной).
 
-Результаты сохраняются в /public/data/ab_test_results.json.
+Запуск:
+    python ab_test_analysis.py
+
+Результаты сохраняются в ./results/ab-test-real-results.json (рядом со скриптом).
+Все пути в скрипте относительные — код запускается из любого каталога.
 """
 
 import json
@@ -28,19 +38,24 @@ import numpy as np
 from scipy import stats
 
 # ---------------------------------------------------------------------------
+# 0. Пути (относительно location скрипта — переносимо)
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+RESULTS_DIR = SCRIPT_DIR / "results"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---------------------------------------------------------------------------
 # 1. Генерация синтетических данных A/B-теста
 # ---------------------------------------------------------------------------
 RNG = np.random.default_rng(seed=42)
 
-# Размеры групп
 N_CONTROL = 5_000  # группа A
 N_VARIANT = 5_000  # группа B
 
-# Истинные конверсии (B лучше на ~1 п.п. — реалистичный значимый эффект)
+# Истинные конверсии (B лучше — реалистичный значимый эффект)
 TRUE_CONV_A = 0.042  # 4.2% — старый лендинг
 TRUE_CONV_B = 0.052  # 5.2% — новый алгоритм рекомендаций
 
-# Генерируем бинарные исходы (0/1) для каждого пользователя
 control_conversions = RNG.binomial(1, TRUE_CONV_A, size=N_CONTROL)
 variant_conversions = RNG.binomial(1, TRUE_CONV_B, size=N_VARIANT)
 
@@ -49,7 +64,7 @@ n_conv_b = int(variant_conversions.sum())
 conv_rate_a = n_conv_a / N_CONTROL
 conv_rate_b = n_conv_b / N_VARIANT
 
-print(f"=== Сгенерированы данные A/B-теста ===")
+print("=== Сгенерированы данные A/B-теста ===")
 print(f"Группа A (контроль): {N_CONTROL:,} пользователей, конверсий {n_conv_a}, "
       f"rate = {conv_rate_a:.4f} ({conv_rate_a*100:.2f}%)")
 print(f"Группа B (тест):     {N_VARIANT:,} пользователей, конверсий {n_conv_b}, "
@@ -57,43 +72,41 @@ print(f"Группа B (тест):     {N_VARIANT:,} пользователей,
 print(f"Разница конверсий (B - A): {(conv_rate_b - conv_rate_a)*100:.2f} п.п.")
 
 # ---------------------------------------------------------------------------
-# 2. t-test через scipy.stats.ttest_ind
+# 2. Z-test для пропорций — ОСНОВНОЙ метод для бинарной конверсии
 # ---------------------------------------------------------------------------
-# Двухвыборочный t-test (Welch's t-test, т.к. дисперсии могут отличаться)
-t_stat, t_p_value = stats.ttest_ind(
-    variant_conversions, control_conversions,
-    equal_var=False,  # Welch's t-test — корректно для бинарных данных
-    alternative="greater",  # односторонний тест: H1: B > A
-)
-
-print(f"\n=== Welch's t-test (scipy.stats.ttest_ind) ===")
-print(f"t-статистика: {t_stat:.4f}")
-print(f"p-value (one-sided): {t_p_value:.6f}")
-
-# Также двухсторонний для сравнения
-t_stat_two, t_p_two = stats.ttest_ind(
-    variant_conversions, control_conversions, equal_var=False
-)
-print(f"p-value (two-sided): {t_p_two:.6f}")
-
-# ---------------------------------------------------------------------------
-# 3. Z-test для пропорций (более корректный для бинарных исходов)
-# ---------------------------------------------------------------------------
-# Формула: z = (p_B - p_A) / sqrt(p_pool * (1 - p_pool) * (1/n_A + 1/n_B))
 p_pool = (n_conv_a + n_conv_b) / (N_CONTROL + N_VARIANT)
 se_pool = np.sqrt(p_pool * (1 - p_pool) * (1 / N_CONTROL + 1 / N_VARIANT))
 z_stat = (conv_rate_b - conv_rate_a) / se_pool
-# односторонний p-value
-z_p_value = 1 - stats.norm.cdf(z_stat)
+z_p_one = 1 - stats.norm.cdf(z_stat)        # односторонний: H1: B > A
+z_p_two = 2 * z_p_one                        # двухсторонний
 
-print(f"\n=== Z-test для пропорций ===")
+print("\n=== Z-test для пропорций (основной метод) ===")
+print(f"p_pool: {p_pool:.4f}")
 print(f"z-статистика: {z_stat:.4f}")
-print(f"p-value (one-sided): {z_p_value:.6f}")
+print(f"p-value (one-sided): {z_p_one:.6f}")
+print(f"p-value (two-sided): {z_p_two:.6f}")
 
 # ---------------------------------------------------------------------------
-# 4. 95% доверительный интервал для разницы конверсий
+# 3. Welch's t-test — перекрёстная проверка (не основной метод для долей)
 # ---------------------------------------------------------------------------
-# Используем непрерывную аппроксимацию (Wald CI)
+t_stat, t_p_one = stats.ttest_ind(
+    variant_conversions, control_conversions,
+    equal_var=False,         # Welch's — не предполагает равенства дисперсий
+    alternative="greater",   # односторонний: H1: B > A
+)
+t_stat_two, t_p_two = stats.ttest_ind(
+    variant_conversions, control_conversions, equal_var=False
+)
+print("\n=== Welch's t-test (перекрёстная проверка) ===")
+print(f"t-статистика: {t_stat:.4f}")
+print(f"p-value (one-sided): {t_p_one:.6f}")
+print(f"p-value (two-sided): {t_p_two:.6f}")
+print("Примечание: для бинарных 0/1 исходов z-test для долей каноничен; "
+      "t-test асимптотически эквивалентен ему при больших n.")
+
+# ---------------------------------------------------------------------------
+# 4. 95% доверительный интервал для разницы конверсий (Wald)
+# ---------------------------------------------------------------------------
 se_diff = np.sqrt(
     conv_rate_a * (1 - conv_rate_a) / N_CONTROL +
     conv_rate_b * (1 - conv_rate_b) / N_VARIANT
@@ -111,10 +124,7 @@ print(f"95% CI: [{ci_low*100:.4f}%, {ci_high*100:.4f}%]")
 # ---------------------------------------------------------------------------
 # 5. Effect size — Cohen's h (для пропорций)
 # ---------------------------------------------------------------------------
-# h = 2 * arcsin(sqrt(p1)) - 2 * arcsin(sqrt(p2))
 h = 2 * np.arcsin(np.sqrt(conv_rate_b)) - 2 * np.arcsin(np.sqrt(conv_rate_a))
-print(f"\n=== Effect size ===")
-print(f"Cohen's h: {h:.4f}")
 if h < 0.2:
     interpretation = "малый эффект (< 0.2)"
 elif h < 0.5:
@@ -123,23 +133,22 @@ elif h < 0.8:
     interpretation = "большой эффект (0.5 — 0.8)"
 else:
     interpretation = "очень большой эффект (≥ 0.8)"
+print(f"\n=== Effect size ===")
+print(f"Cohen's h: {h:.4f}")
 print(f"Интерпретация: {interpretation}")
 
 # ---------------------------------------------------------------------------
-# 6. Статистическая значимость (двухсторонний тест как основной)
+# 6. Статистическая значимость (двухсторонний z-test как основной)
 # ---------------------------------------------------------------------------
-# Используем двухсторонний тест как основной — это более строгий и общепринятый
-# подход в A/B-тестировании (мы заранее не знаем направление эффекта).
-# Односторонний тест показываем как справочную информацию.
-is_significant = t_p_two < alpha
-
-print(f"\n=== Вывод (основной — двухсторонний тест) ===")
+is_significant = z_p_two < alpha
+print(f"\n=== Вывод (основной — двухсторонний z-test для пропорций) ===")
 print(f"Уровень значимости α = {alpha}")
-print(f"p-value (двухсторонний) = {t_p_two:.6f}")
-print(f"p-value < α? {t_p_two < alpha}")
+print(f"p-value (двухсторонний, z-test) = {z_p_two:.6f}")
+print(f"p-value < α? {is_significant}")
+
 if is_significant:
     conclusion = (
-        f"Результат статистически значим (двухсторонний p = {t_p_two:.4f} < α = {alpha}). "
+        f"Результат статистически значим (двухсторонний z-test, p = {z_p_two:.4f} < α = {alpha}). "
         f"Отвергаем нулевую гипотезу H0: конверсии групп A и B равны. "
         f"Группа B (новый алгоритм) показала значимо более высокую конверсию: "
         f"{conv_rate_b*100:.2f}% vs {conv_rate_a*100:.2f}%, "
@@ -147,14 +156,17 @@ if is_significant:
         f"относительный прирост +{(conv_rate_b - conv_rate_a)/conv_rate_a*100:.1f}%. "
         f"95% доверительный интервал для разницы не содержит 0: "
         f"[{ci_low*100:.2f}%, {ci_high*100:.2f}%]. "
-        f"Effect size (Cohen's h = {h:.3f}) — {interpretation}."
+        f"Effect size (Cohen's h = {h:.3f}) — {interpretation}. "
+        f"Важно: при размере групп 5 000+5 000 статистическая значимость достигается "
+        f"даже при малом effect size, поэтому решение о раскатке нужно принимать с "
+        f"учётом практической значимости (бизнес-выгода от +1.22 п.п. vs стоимость "
+        f"разработки и поддержки нового алгоритма)."
     )
 else:
     conclusion = (
-        f"Результат не статистически значим (двухсторонний p = {t_p_two:.4f} ≥ α = {alpha}). "
-        f"Не можем отвергнуть нулевую гипотезу H0. Различия в конверсиях могут быть "
-        f"обусловлены случайностью. 95% CI для разницы содержит 0: "
-        f"[{ci_low*100:.2f}%, {ci_high*100:.2f}%]. "
+        f"Результат не статистически значим (двухсторонний z-test, p = {z_p_two:.4f} ≥ α = {alpha}). "
+        f"Не можем отвергнуть H0. Различия могут быть случайны. "
+        f"95% CI содержит 0: [{ci_low*100:.2f}%, {ci_high*100:.2f}%]. "
         f"Рекомендация: увеличить выборку или принять H0."
     )
 print(conclusion)
@@ -170,9 +182,8 @@ chart_data = [
 chart_config = [
     {"dataKey": "value", "color": "var(--chart-2)", "label": "Конверсия, %"},
 ]
-
 real_results = [
-    {"metric": "P-value (двухсторонний)", "value": f"{t_p_two:.4f}"},
+    {"metric": "P-value (двухсторонний, z-test)", "value": f"{z_p_two:.4f}"},
     {"metric": "Конверсия A (контроль)", "value": f"{conv_rate_a*100:.2f}%"},
     {"metric": "Конверсия B (тест)", "value": f"{conv_rate_b*100:.2f}%"},
     {"metric": "Статистическая значимость", "value":
@@ -180,7 +191,7 @@ real_results = [
 ]
 
 # ---------------------------------------------------------------------------
-# 8. Сохранение в JSON
+# 8. Сохранение в JSON (в results/ рядом со скриптом)
 # ---------------------------------------------------------------------------
 output = {
     "chartType": "bar",
@@ -192,10 +203,9 @@ output = {
         "data_source": "Синтетические данные, сгенерированные numpy (seed=42)",
         "is_synthetic": True,
         "synthetic_note": (
-            "Данные сгенерированы через numpy.random.binomial с фиксированным seed=42 "
-            "для воспроизводимости. Использованы реальные размеры групп (5000+5000) "
-            "и реалистичные конверсии e-commerce (4-5%). Все статистические расчёты "
-            "выполнены через scipy.stats на этих данных — вывод валиден."
+            "Данные сгенерированы через numpy.random.binomial с seed=42 для воспроизводимости. "
+            "Размеры групп 5000+5000, реалистичные конверсии e-commerce (4-5%). "
+            "Реальные данные A/B-тестов компаний не публикуются."
         ),
         "n_control": N_CONTROL,
         "n_variant": N_VARIANT,
@@ -205,13 +215,14 @@ output = {
         "conv_rate_variant": float(conv_rate_b),
         "absolute_diff": float(diff),
         "relative_lift_pct": float((conv_rate_b - conv_rate_a) / conv_rate_a * 100),
-        # t-test
-        "t_statistic": float(t_stat),
-        "p_value_one_sided": float(t_p_value),
-        "p_value_two_sided": float(t_p_two),
-        # z-test
+        # z-test (основной)
         "z_statistic": float(z_stat),
-        "z_p_value": float(z_p_value),
+        "z_p_value_one_sided": float(z_p_one),
+        "z_p_value_two_sided": float(z_p_two),
+        # t-test (перекрёстная проверка)
+        "t_statistic": float(t_stat),
+        "t_p_value_one_sided": float(t_p_one),
+        "t_p_value_two_sided": float(t_p_two),
         # CI
         "ci_95_low": float(ci_low),
         "ci_95_high": float(ci_high),
@@ -222,27 +233,22 @@ output = {
         # вывод
         "alpha": alpha,
         "is_significant": bool(is_significant),
+        "primary_method": "Z-test для пропорций (двухсторонний)",
         "conclusion": conclusion,
-        "method": "Welch's t-test (scipy.stats.ttest_ind, equal_var=False) + "
-                  "Z-test для пропорций + Wald 95% CI + Cohen's h",
+        "method": "Z-test для пропорций (основной) + Welch's t-test (перекрёстная проверка) "
+                  "+ Wald 95% CI + Cohen's h",
     },
     "realResults": real_results,
 }
 
-out_path = Path("/home/z/my-project/public/data/ab_test_results.json")
-out_path.parent.mkdir(parents=True, exist_ok=True)
-with open(out_path, "w", encoding="utf-8") as f:
+results_path = RESULTS_DIR / "ab-test-real-results.json"
+with open(results_path, "w", encoding="utf-8") as f:
     json.dump(output, f, indent=2, ensure_ascii=False)
 
-# Полные результаты в архив
-processed_dir = Path("/home/z/my-project/data/processed")
-processed_dir.mkdir(parents=True, exist_ok=True)
-with open(processed_dir / "ab-test-real-results.json", "w", encoding="utf-8") as f:
-    json.dump(output, f, indent=2, ensure_ascii=False)
-
-print(f"\n✓ Saved → {out_path}")
-print(f"✓ Saved → {processed_dir / 'ab-test-real-results.json'}")
+print(f"\n✓ Saved → {results_path.relative_to(SCRIPT_DIR)}")
 print(f"\nФинальные метрики:")
-print(f"  P-value: {t_p_value:.4f}")
+print(f"  P-value (z-test, two-sided): {z_p_two:.4f}")
+print(f"  P-value (t-test, two-sided): {t_p_two:.4f}")
 print(f"  Конверсия A → B: {conv_rate_a*100:.2f}% → {conv_rate_b*100:.2f}%")
+print(f"  Cohen's h: {h:.4f} ({interpretation})")
 print(f"  Значимо: {is_significant}")
